@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Text.RegularExpressions;
 using Gruppo.Client.Utilities;
@@ -15,7 +16,7 @@ namespace Gruppo.MessageBroker
     private long ProduceOffset;
     private BinaryWriter ProduceIndexWriter;
     private BinaryWriter ProduceMessageWriter;
-
+    private Dictionary<string, Group> GroupConsumers;
     private GruppoSettings Settings;
 
 
@@ -30,59 +31,108 @@ namespace Gruppo.MessageBroker
 
       Name = topicName.NotNullOrEmpty(nameof(topicName));
       FileSystem = fileSystemFactory.NotNull(nameof(fileSystemFactory))(Settings.StorageDirectory, topicName);
+      GroupConsumers = new Dictionary<string, Group>();
+      LoadGroupIndexs();
 
       // find the product offset on startup
       ProduceOffset = 0;
-      int biggestId = 1;
-      foreach (var indexFilePath in FileSystem.EnumerateFiles(FileType.Index))
+      using (var reader = FileSystem.OpenIndexReader())
       {
-        var match = Regex.Match(indexFilePath, @"^index_(\d*)\.bin$");
-
-        if (match.Success)
+        if (reader.BaseStream.Length >= sizeof(long))
         {
-          int id = int.Parse(match.Groups[1].Value);
-          if (id > biggestId)
-          {
-            biggestId = id;
-          }
+          reader.BaseStream.Seek(sizeof(long), SeekOrigin.End);
+          ProduceOffset = reader.ReadInt64();
         }
       }
 
-      ProduceIndexWriter = FileSystem.OpenFileWriter(FileType.Index, biggestId);
+      ProduceIndexWriter = FileSystem.OpenIndexWriter();
       ProduceIndexWriter.BaseStream.Seek(0, SeekOrigin.End);
-      ProduceOffset = ProduceIndexWriter.BaseStream.Length / sizeof(Int64) + (biggestId - 1) * Settings.MaxMessagesInMessageFile;
 
-      ProduceMessageWriter = FileSystem.OpenFileWriter(FileType.Message, biggestId);
+      ProduceMessageWriter = FileSystem.OpenMessageFileWriter(ProduceOffset);
       ProduceMessageWriter.BaseStream.Seek(0, SeekOrigin.End);
+    }
+
+    private void LoadGroupIndexs()
+    {
+      foreach (var groupName in FileSystem.EnumerateGroupNames())
+      {
+        Group g = CreateGroup(groupName);
+
+        GroupConsumers.Add(groupName, g);
+      }
+    }
+
+    private Group CreateGroup(string groupName)
+    {
+      Group g = new Group();
+      g.Name = groupName;
+      using (var reader = FileSystem.OpenGroupIndexFileReader(groupName))
+      {
+        g.GroupIndexWriter = FileSystem.OpenGroupIndexFileWriter(g.Name);
+        g.Offset = (reader.BaseStream.Length < sizeof(Int64)) ? 0 : reader.ReadInt64();
+        g.IndexReader = FileSystem.OpenIndexReader();
+        g.MessageReader = FileSystem.OpenMessageFileReader(g.Offset);
+
+        // read the position in the message file
+        long indexPosition = g.Offset * sizeof(Int64);
+        g.IndexReader.BaseStream.Position = indexPosition;
+        long messagePosition = (reader.BaseStream.Length < sizeof(Int64)) ? 0 : g.IndexReader.ReadInt64();
+        g.MessageReader.BaseStream.Position = messagePosition;
+
+        // reset the index reader
+        g.IndexReader.BaseStream.Position = indexPosition;
+      }
+
+      return g;
     }
 
     public string Name { get; private set; }
 
-    public void Consume(string group, out GruppoMessage message)
-    {
-      throw new NotImplementedException();
-    }
-
-    public void Consume(long offset, out GruppoMessage message)
+    public void Consume(string groupName, out GruppoMessage message)
     {
       if (Guard.EnterExecute())
       {
         try
         {
-          int id = (int)(offset / Settings.MaxMessagesInMessageFile) + 1;
-          long localBegin = (offset - (id - 1) * Settings.MaxMessagesInMessageFile) * sizeof(Int64);
-          using (var index = FileSystem.OpenFileReader(FileType.Index, id))
-          using (var messageReader = FileSystem.OpenFileReader(FileType.Message, id))
+          Group group;
+          lock (GroupConsumers)
           {
-            index.BaseStream.Seek(localBegin, SeekOrigin.Begin);
-            long beginOffset = index.ReadInt64();
-            messageReader.BaseStream.Seek(beginOffset, SeekOrigin.Begin);
-            message = new GruppoMessage();
-            message.Offset = beginOffset;
-            message.Timestamp = new DateTime(messageReader.ReadInt64());
-            message.Meta = messageReader.ReadString();
-            int length = messageReader.ReadInt32();
-            message.Body = messageReader.ReadBytes(length);
+            if (!GroupConsumers.TryGetValue(groupName, out group))
+            {
+              group = CreateGroup(groupName);
+              GroupConsumers.Add(groupName, group);
+            }
+          }
+
+          lock (group)
+          {
+            // is there a message to read?
+            if (group.IndexReader.BaseStream.Position < group.IndexReader.BaseStream.Length)
+            {
+              // advance the index reader -- this is an atomic way of knowing if we have finished reading a message
+              // writing the index takes one step, writing the message takes several steps and we shouldn't try to read
+              // a message until it's completely written.  The index is the last thing written so wait on it.
+              long messagePosition = group.IndexReader.ReadInt64();
+
+              // if the offset is zero then a new message file has been reached get it
+              if (messagePosition == 0)
+              {
+                group.MessageReader.Dispose();
+                group.MessageReader = FileSystem.OpenMessageFileReader(group.Offset);
+              }
+
+              // read the message
+              message = ReadMessage(group.MessageReader, group.Offset, true);
+              group.Offset++;
+
+              // write group index out
+              group.GroupIndexWriter.BaseStream.Position = 0;
+              group.GroupIndexWriter.Write(group.Offset);
+            }
+            else
+            {
+              message = null;
+            }
           }
         }
         finally
@@ -92,6 +142,43 @@ namespace Gruppo.MessageBroker
       }
       else
         message = null;
+    }
+
+    public void Consume(long offset, out GruppoMessage message)
+    {
+      if (Guard.EnterExecute())
+      {
+        try
+        {
+          using (var index = FileSystem.OpenIndexReader())
+          using (var messageReader = FileSystem.OpenMessageFileReader(offset))
+          {
+            index.BaseStream.Seek((offset) * sizeof(Int64), SeekOrigin.Begin);
+            long beginOffset = index.ReadInt64();
+            messageReader.BaseStream.Seek(beginOffset, SeekOrigin.Begin);
+            message = ReadMessage(messageReader, offset, true);
+          }
+        }
+        finally
+        {
+          Guard.ExitExecute();
+        }
+      }
+      else
+        message = null;
+    }
+
+    private static GruppoMessage ReadMessage(BinaryReader messageReader, long offset, bool readBody)
+    {
+      GruppoMessage message = new GruppoMessage();
+      message.Offset = offset;
+      message.Timestamp = new DateTime(messageReader.ReadInt64());
+      message.Meta = messageReader.ReadString();
+      int length = messageReader.ReadInt32();
+      if (readBody)
+        message.Body = messageReader.ReadBytes(length);
+
+      return message;
     }
 
     public void Dispose()
@@ -127,17 +214,20 @@ namespace Gruppo.MessageBroker
       {
         try
         {
-          int id = (int)(offset / Settings.MaxMessagesInMessageFile) + 1;
-          long localBegin = (offset - (id - 1) * Settings.MaxMessagesInMessageFile) * sizeof(Int64);
-          using (var index = FileSystem.OpenFileReader(FileType.Index, id))
-          using (var messageReader = FileSystem.OpenFileReader(FileType.Message, id))
+          using (var index = FileSystem.OpenIndexReader())
+          using (var messageReader = FileSystem.OpenMessageFileReader(offset))
           {
-            index.BaseStream.Seek(localBegin, SeekOrigin.Begin);
-            long beginOffset = index.ReadInt64();
-            message = new GruppoMessage();
-            message.Offset = beginOffset;
-            message.Timestamp = new DateTime(messageReader.ReadInt64());
-            message.Meta = messageReader.ReadString();
+            long position = offset * sizeof(long);
+            if (position > index.BaseStream.Length)
+            {
+              message = null;
+              return;
+            }
+
+            index.BaseStream.Position = position;
+            long messagePosition = index.ReadInt64();
+            messageReader.BaseStream.Position = messagePosition;
+            message = ReadMessage(messageReader, offset, false);
           }
         }
         finally
@@ -202,11 +292,17 @@ namespace Gruppo.MessageBroker
 
     private void CreateProduceWriters()
     {
-      int id = (int)(ProduceOffset / Settings.MaxMessagesInMessageFile);
+      ProduceMessageWriter.Dispose();
+      ProduceMessageWriter = FileSystem.OpenMessageFileWriter(ProduceOffset);
+    }
 
-      ProduceIndexWriter.Dispose();
-      ProduceIndexWriter = FileSystem.OpenFileWriter(FileType.Index, id);
-      ProduceMessageWriter = FileSystem.OpenFileWriter(FileType.Message, id);
+    private class Group
+    {
+      public string Name;
+      public long Offset;
+      public BinaryReader IndexReader;
+      public BinaryReader MessageReader;
+      public BinaryWriter GroupIndexWriter;
     }
   }
 }

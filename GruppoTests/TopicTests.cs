@@ -1,6 +1,9 @@
 ﻿using System;
+using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Text;
+using System.Threading;
 using Gruppo;
 using Gruppo.MessageBroker;
 using Gruppo.SDK.Exceptions;
@@ -21,7 +24,7 @@ namespace GruppoTests
       using (Topic topicA = new Topic(
         expectedName,
         new GruppoSettings() { StorageDirectory = expectedDir, MaxMessagesInMessageFile = 100 },
-        (baseDir, topic) => new HardDriveFileSystem(baseDir, topic)))
+        (baseDir, topic) => new HardDriveFileSystem(baseDir, topic, 100)))
       {
 
         TopicStatistics stats = topicA.GetStats();
@@ -93,15 +96,27 @@ namespace GruppoTests
       long actualOffset = 0;
       DateTime actualTimestamp;
 
+      List<ManualResetEvent> events = new List<ManualResetEvent>();
       for (int j = 0; j < 5; j++)
       {
+        var localEvent = new ManualResetEvent(false);
+        events.Add(localEvent);
         System.Threading.ThreadPool.QueueUserWorkItem(o =>
        {
+         var evt = o as ManualResetEvent;
          for (int i = 0; i < 5; i++)
          {
            topic.Produce(expectedMessage1, out actualOffset, out actualTimestamp);
+           Console.WriteLine($"Produced: {actualOffset} {actualTimestamp}");
          }
-       });
+         evt.Set();
+       }, localEvent);
+      }
+
+      foreach(var e in events)
+      {
+        e.WaitOne();
+        e.Dispose();
       }
 
       GruppoMessage actualMessage;
@@ -135,7 +150,7 @@ namespace GruppoTests
       if (Directory.Exists(settings.StorageDirectory))
         Directory.Delete(settings.StorageDirectory, true);
 
-      return new Topic(topicName, settings, (baseDir, topic) => new HardDriveFileSystem(baseDir, topic));
+      return new Topic(topicName, settings, (baseDir, topic) => new HardDriveFileSystem(baseDir, topic, 100));
     }
 
 

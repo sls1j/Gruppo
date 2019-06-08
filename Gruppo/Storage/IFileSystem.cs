@@ -9,16 +9,18 @@ namespace Gruppo.Storage
   public interface IFileSystem
   {
     string TopicDirectory { get; }
+    int MessageSplitSize { get; }
 
     long FileSize(string fileName);
-    string FileName(FileType fileType, int id);
+    string FileName(int id);
 
-    IEnumerable<string> EnumerateFiles(FileType type);
-    Stream OpenFileStream(FileType type, int id);
-    BinaryWriter OpenFileWriter(FileType type, int id);
-    BinaryReader OpenFileReader(FileType type, int id);
+    IEnumerable<string> EnumerateMessageFiles();
+    BinaryWriter OpenMessageFileWriter(long offset);
+    BinaryReader OpenMessageFileReader(long offset);
+    BinaryWriter OpenIndexWriter();
+    BinaryReader OpenIndexReader();
 
-    IEnumerable<string> EnumerateGroupIndexFiles();
+    IEnumerable<string> EnumerateGroupNames();
     BinaryWriter OpenGroupIndexFileWriter(string groupName);
     BinaryReader OpenGroupIndexFileReader(string groupName);
   }
