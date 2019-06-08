@@ -17,20 +17,19 @@ namespace Gruppo.MessageBroker
     private BinaryWriter ProduceIndexWriter;
     private BinaryWriter ProduceMessageWriter;
     private Dictionary<string, Group> GroupConsumers;
-    private GruppoSettings Settings;
 
 
-    public Topic(string topicName, GruppoSettings settings, Func<string, string, IFileSystem> fileSystemFactory)
+    public Topic(string topicName, IFileSystem fileSystem)
     {
       if (!Regex.IsMatch(topicName, @"^[\d\-\.a-z]*$"))
         throw new InvalidTopicNameException($"'{topicName} is not valid.");
 
-      Settings = settings.NotNull(nameof(settings));
+      fileSystem.Activate();
 
       Guard = new ExecutionGuard();
 
       Name = topicName.NotNullOrEmpty(nameof(topicName));
-      FileSystem = fileSystemFactory.NotNull(nameof(fileSystemFactory))(Settings.StorageDirectory, topicName);
+      FileSystem = fileSystem.NotNull(nameof(fileSystem));
       GroupConsumers = new Dictionary<string, Group>();
       LoadGroupIndexs();
 
@@ -269,7 +268,7 @@ namespace Gruppo.MessageBroker
           }
 
           // check to see if the file needs to be rolled
-          if (ProduceOffset % Settings.MaxMessagesInMessageFile == 0)
+          if (ProduceOffset % FileSystem.MessageSplitSize == 0)
           {
             CreateProduceWriters();
           }

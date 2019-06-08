@@ -8,6 +8,7 @@ namespace Gruppo.Storage
   public enum FileType { Index, Message};
   public interface IFileSystem
   {
+    void Activate();
     string TopicDirectory { get; }
     int MessageSplitSize { get; }
 

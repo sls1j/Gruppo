@@ -18,20 +18,22 @@ namespace GruppoTests
     [Test]
     public void ConstructorTest()
     {
-      string expectedName = "a";
-      string expectedDir = @"c:\gruppo";
+      string expectedTopicName = "a";
+      var context = TestContext.CurrentContext;
+      var expectedStoragePath = Path.Combine(context.WorkDirectory, context.Test.Name, context.Test.ID, "topics");
+
+      if (Directory.Exists(expectedStoragePath))
+        Directory.Delete(expectedStoragePath, true);
 
       using (Topic topicA = new Topic(
-        expectedName,
-        new GruppoSettings() { StorageDirectory = expectedDir, MaxMessagesInMessageFile = 100 },
-        (baseDir, topic) => new HardDriveFileSystem(baseDir, topic, 100)))
+        expectedTopicName, new HardDriveFileSystem(expectedStoragePath, expectedTopicName, 100)))
       {
 
         TopicStatistics stats = topicA.GetStats();
 
-        Assert.AreEqual(expectedName, topicA.Name);
+        Assert.AreEqual(expectedTopicName, topicA.Name);
         Assert.NotNull(stats);
-        Assert.AreEqual(Path.Combine(expectedDir, "topics", expectedName), stats.StorageDirectory);
+        Assert.AreEqual(Path.Combine(expectedStoragePath, "topics", expectedTopicName), stats.StorageDirectory);
       }
     }
 
@@ -141,16 +143,12 @@ namespace GruppoTests
     private Topic BuildTopic(string topicName)
     {
       var context = TestContext.CurrentContext;
-      var settings = new GruppoSettings()
-      {
-        MaxMessagesInMessageFile = 100,
-        StorageDirectory = Path.Combine(context.WorkDirectory, context.Test.Name, context.Test.ID, "topics")
-      };
+      var storagePath = Path.Combine(context.WorkDirectory, context.Test.Name, context.Test.ID, "topics");
 
-      if (Directory.Exists(settings.StorageDirectory))
-        Directory.Delete(settings.StorageDirectory, true);
+      if (Directory.Exists(storagePath))
+        Directory.Delete(storagePath, true);
 
-      return new Topic(topicName, settings, (baseDir, topic) => new HardDriveFileSystem(baseDir, topic, 100));
+      return new Topic(topicName, new HardDriveFileSystem(storagePath, topicName, 100));
     }
 
 
