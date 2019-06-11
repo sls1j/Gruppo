@@ -11,53 +11,53 @@ namespace Gruppo.MessageBroker
 {
   public class Topic : ITopic
   {
-    private ExecutionGuard Guard;
-    private IFileSystem FileSystem;
-    private long ProduceOffset;
-    private BinaryWriter ProduceIndexWriter;
-    private BinaryWriter ProduceMessageWriter;
-    private Dictionary<string, Group> GroupConsumers;
+    private ExecutionGuard _guard;
+    private IFileSystem _fileSystem;
+    private long _produceOffset;
+    private BinaryWriter _produceIndexWriter;
+    private BinaryWriter _produceMessageWriter;
+    private Dictionary<string, Group> _groupConsumers;
 
 
     public Topic(string topicName, IFileSystem fileSystem)
     {
-      if (!Regex.IsMatch(topicName, @"^[\d\-\.a-z]*$"))
+      if (!Regex.IsMatch(topicName, @"^[\d\-\.a-z_]*$"))
         throw new InvalidTopicNameException($"'{topicName} is not valid.");
 
       fileSystem.Activate();
 
-      Guard = new ExecutionGuard();
+      _guard = new ExecutionGuard();
 
       Name = topicName.NotNullOrEmpty(nameof(topicName));
-      FileSystem = fileSystem.NotNull(nameof(fileSystem));
-      GroupConsumers = new Dictionary<string, Group>();
+      _fileSystem = fileSystem.NotNull(nameof(fileSystem));
+      _groupConsumers = new Dictionary<string, Group>();
       LoadGroupIndexs();
 
       // find the product offset on startup
-      ProduceOffset = 0;
-      using (var reader = FileSystem.OpenIndexReader())
+      _produceOffset = 0;
+      using (var reader = _fileSystem.OpenIndexReader())
       {
         if (reader.BaseStream.Length >= sizeof(long))
         {
           reader.BaseStream.Seek(sizeof(long), SeekOrigin.End);
-          ProduceOffset = reader.ReadInt64();
+          _produceOffset = reader.ReadInt64();
         }
       }
 
-      ProduceIndexWriter = FileSystem.OpenIndexWriter();
-      ProduceIndexWriter.BaseStream.Seek(0, SeekOrigin.End);
+      _produceIndexWriter = _fileSystem.OpenIndexWriter();
+      _produceIndexWriter.BaseStream.Seek(0, SeekOrigin.End);
 
-      ProduceMessageWriter = FileSystem.OpenMessageFileWriter(ProduceOffset);
-      ProduceMessageWriter.BaseStream.Seek(0, SeekOrigin.End);
+      _produceMessageWriter = _fileSystem.OpenMessageFileWriter(_produceOffset);
+      _produceMessageWriter.BaseStream.Seek(0, SeekOrigin.End);
     }
 
     private void LoadGroupIndexs()
     {
-      foreach (var groupName in FileSystem.EnumerateGroupNames())
+      foreach (var groupName in _fileSystem.EnumerateGroupNames())
       {
         Group g = CreateGroup(groupName);
 
-        GroupConsumers.Add(groupName, g);
+        _groupConsumers.Add(groupName, g);
       }
     }
 
@@ -65,12 +65,12 @@ namespace Gruppo.MessageBroker
     {
       Group g = new Group();
       g.Name = groupName;
-      using (var reader = FileSystem.OpenGroupIndexFileReader(groupName))
+      using (var reader = _fileSystem.OpenGroupIndexFileReader(groupName))
       {
-        g.GroupIndexWriter = FileSystem.OpenGroupIndexFileWriter(g.Name);
+        g.GroupIndexWriter = _fileSystem.OpenGroupIndexFileWriter(g.Name);
         g.Offset = (reader.BaseStream.Length < sizeof(Int64)) ? 0 : reader.ReadInt64();
-        g.IndexReader = FileSystem.OpenIndexReader();
-        g.MessageReader = FileSystem.OpenMessageFileReader(g.Offset);
+        g.IndexReader = _fileSystem.OpenIndexReader();
+        g.MessageReader = _fileSystem.OpenMessageFileReader(g.Offset);
 
         // read the position in the message file
         long indexPosition = g.Offset * sizeof(Int64);
@@ -85,21 +85,36 @@ namespace Gruppo.MessageBroker
       return g;
     }
 
+    public void SetOffset(string groupName, int offset)
+    {
+      Group group;
+      lock (_groupConsumers)
+      {
+        if (!_groupConsumers.TryGetValue(groupName, out group))
+        {
+          group = CreateGroup(groupName);
+          _groupConsumers.Add(groupName, group);
+        }
+      }
+
+      throw new NotImplementedException();
+    }
+
     public string Name { get; private set; }
 
     public void Consume(string groupName, out GruppoMessage message)
     {
-      if (Guard.EnterExecute())
+      if (_guard.EnterExecute())
       {
         try
         {
           Group group;
-          lock (GroupConsumers)
+          lock (_groupConsumers)
           {
-            if (!GroupConsumers.TryGetValue(groupName, out group))
+            if (!_groupConsumers.TryGetValue(groupName, out group))
             {
               group = CreateGroup(groupName);
-              GroupConsumers.Add(groupName, group);
+              _groupConsumers.Add(groupName, group);
             }
           }
 
@@ -117,7 +132,7 @@ namespace Gruppo.MessageBroker
               if (messagePosition == 0)
               {
                 group.MessageReader.Dispose();
-                group.MessageReader = FileSystem.OpenMessageFileReader(group.Offset);
+                group.MessageReader = _fileSystem.OpenMessageFileReader(group.Offset);
               }
 
               // read the message
@@ -136,7 +151,7 @@ namespace Gruppo.MessageBroker
         }
         finally
         {
-          Guard.ExitExecute();
+          _guard.ExitExecute();
         }
       }
       else
@@ -145,12 +160,12 @@ namespace Gruppo.MessageBroker
 
     public void Consume(long offset, out GruppoMessage message)
     {
-      if (Guard.EnterExecute())
+      if (_guard.EnterExecute())
       {
         try
         {
-          using (var index = FileSystem.OpenIndexReader())
-          using (var messageReader = FileSystem.OpenMessageFileReader(offset))
+          using (var index = _fileSystem.OpenIndexReader())
+          using (var messageReader = _fileSystem.OpenMessageFileReader(offset))
           {
             index.BaseStream.Seek((offset) * sizeof(Int64), SeekOrigin.Begin);
             long beginOffset = index.ReadInt64();
@@ -160,7 +175,7 @@ namespace Gruppo.MessageBroker
         }
         finally
         {
-          Guard.ExitExecute();
+          _guard.ExitExecute();
         }
       }
       else
@@ -182,17 +197,28 @@ namespace Gruppo.MessageBroker
 
     public void Dispose()
     {
-      if (ProduceIndexWriter != null)
+      if (_produceIndexWriter != null)
       {
-        ProduceIndexWriter.Dispose();
-        ProduceIndexWriter = null;
+        _produceIndexWriter.Dispose();
+        _produceIndexWriter = null;
       }
 
-      if (ProduceMessageWriter != null)
+      if (_produceMessageWriter != null)
       {
-        ProduceMessageWriter.Dispose();
-        ProduceIndexWriter = null;
+        _produceMessageWriter.Dispose();
+        _produceIndexWriter = null;
       }
+
+      foreach (var group in _groupConsumers.Values)
+      {
+        group.GroupIndexWriter.Dispose();
+        group.IndexReader.Dispose();
+        group.MessageReader.Dispose();
+      }
+
+      _groupConsumers.Clear();
+
+      GC.SuppressFinalize(this);
     }
 
     public TopicStatistics GetStats()
@@ -201,20 +227,21 @@ namespace Gruppo.MessageBroker
       {
         return new TopicStatistics()
         {
-          StorageDirectory = FileSystem.TopicDirectory,
-          MessageCount = ProduceOffset
+          Name = Name,
+          StorageDirectory = _fileSystem.TopicDirectory,
+          MessageCount = _produceOffset
         };
       }
     }
 
     public void Peek(long offset, out GruppoMessage message)
     {
-      if (Guard.EnterExecute())
+      if (_guard.EnterExecute())
       {
         try
         {
-          using (var index = FileSystem.OpenIndexReader())
-          using (var messageReader = FileSystem.OpenMessageFileReader(offset))
+          using (var index = _fileSystem.OpenIndexReader())
+          using (var messageReader = _fileSystem.OpenMessageFileReader(offset))
           {
             long position = offset * sizeof(long);
             if (position > index.BaseStream.Length)
@@ -231,7 +258,7 @@ namespace Gruppo.MessageBroker
         }
         finally
         {
-          Guard.ExitExecute();
+          _guard.ExitExecute();
         }
       }
       else
@@ -240,7 +267,7 @@ namespace Gruppo.MessageBroker
 
     public bool Produce(GruppoMessage message, out long offset, out DateTime timestamp)
     {
-      if (Guard.EnterExecute())
+      if (_guard.EnterExecute())
       {
         try
         {
@@ -248,27 +275,27 @@ namespace Gruppo.MessageBroker
           {
             // write out the message to the message stream
             timestamp = DateTime.UtcNow;
-            long beginOffset = ProduceMessageWriter.BaseStream.Position;
-            ProduceMessageWriter.Write(timestamp.Ticks);
-            ProduceMessageWriter.Write(message.Meta ?? string.Empty);
+            long beginOffset = _produceMessageWriter.BaseStream.Position;
+            _produceMessageWriter.Write(timestamp.Ticks);
+            _produceMessageWriter.Write(message.Meta ?? string.Empty);
             if (message.Body == null)
-              ProduceMessageWriter.Write((int)0);
+              _produceMessageWriter.Write((int)0);
             else
             {
-              ProduceMessageWriter.Write(message.Body.Length);
-              ProduceMessageWriter.Write(message.Body);
+              _produceMessageWriter.Write(message.Body.Length);
+              _produceMessageWriter.Write(message.Body);
             }
-            ProduceMessageWriter.Flush();
+            _produceMessageWriter.Flush();
 
-            offset = ProduceOffset++;
+            offset = _produceOffset++;
 
             // write message start position to the index
-            ProduceIndexWriter.Write(beginOffset);
-            ProduceIndexWriter.Flush();
+            _produceIndexWriter.Write(beginOffset);
+            _produceIndexWriter.Flush();
           }
 
           // check to see if the file needs to be rolled
-          if (ProduceOffset % FileSystem.MessageSplitSize == 0)
+          if (_produceOffset % _fileSystem.MessageSplitSize == 0)
           {
             CreateProduceWriters();
           }
@@ -277,7 +304,7 @@ namespace Gruppo.MessageBroker
         }
         finally
         {
-          Guard.ExitExecute();
+          _guard.ExitExecute();
         }
       }
       else
@@ -291,8 +318,8 @@ namespace Gruppo.MessageBroker
 
     private void CreateProduceWriters()
     {
-      ProduceMessageWriter.Dispose();
-      ProduceMessageWriter = FileSystem.OpenMessageFileWriter(ProduceOffset);
+      _produceMessageWriter.Dispose();
+      _produceMessageWriter = _fileSystem.OpenMessageFileWriter(_produceOffset);
     }
 
     private class Group

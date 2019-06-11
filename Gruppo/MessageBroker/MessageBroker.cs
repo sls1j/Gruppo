@@ -1,63 +1,114 @@
 ﻿using System;
 using System.Collections.Generic;
-using System.IO;
-using System.Text;
+using System.Linq;
+using Gruppo.Storage;
 
 namespace Gruppo.MessageBroker
 {
   public class MessageBroker : IMessageBroker
   {
+    private Dictionary<string, Topic> _topics;
+
     public MessageBroker(GruppoSettings settings)
     {
+      _topics = new Dictionary<string, Topic>();
+      this._settings = settings;
+    }   
 
+    public void Consume(string topicName, string group, out GruppoMessage message)
+    {
+      message = null;
+
+      Topic topic = GetTopic(topicName);
+
+      if (topic != null)
+      {
+        topic.Consume(group, out message);
+      }
     }
 
-    public void Start()
+
+    public void CreateTopic(string topicName)
     {
-
-    }
-
-    public void Stop()
-    {
-
-    }    
-
-    public void ConsumeMessage(string group, string topic, GruppoMessage message)
-    {
-      throw new NotImplementedException();
-    }
-
-    public void CreateTopic(string topic)
-    {
-      throw new NotImplementedException();
+      lock (_topics)
+      {
+        if (!_topics.ContainsKey(topicName))
+        {
+          var fileSystem = new HardDriveFileSystem(_settings.StorageDirectory, topicName, _settings.MaxMessagesInMessageFile);
+          _topics.Add(topicName, new Topic(topicName, fileSystem));
+        }
+      }
     }
 
     public string[] GetTopicNames()
     {
-      throw new NotImplementedException();
+      lock( _topics )
+      {
+        return _topics.Keys.ToArray();
+      }
     }
 
     public TopicStatistics[] GetTopicStatistics()
     {
-      throw new NotImplementedException();
+      lock( _topics )
+      {
+        return _topics.Values.Select(t => t.GetStats()).ToArray();
+      }
     }
 
-    public void PeekMessage(string group, string topic, GruppoMessage message)
+    public void Peek(string topicName, long offset, out GruppoMessage message)
     {
-      throw new NotImplementedException();
+      message = null;
+      Topic topic = GetTopic(topicName);
+      if ( topic != null )
+      {
+        topic.Peek(offset, out message);
+      }
     }
 
-    public void ProduceMessage(string topic, string meta, Stream body, out int offset)
+    public void Produce(string topicName, string meta, byte[] body, out long offset, out DateTime timestamp)
     {
-      throw new NotImplementedException();
+      Topic topic = GetTopic(topicName);
+
+      if (topic == null)
+      {
+        CreateTopic(topicName);
+        topic = GetTopic(topicName);
+      }
+
+      {
+        GruppoMessage message = new GruppoMessage()
+        {
+          Meta = meta,
+          Body = body
+        };
+
+        topic.Produce(message, out offset, out timestamp);
+      }
     }
 
-    public void SetOffset(string group, int offset)
+    private Topic GetTopic(string topicName)
     {
-      throw new NotImplementedException();
+      Topic topic;
+      lock (_topics)
+      {
+        _topics.TryGetValue(topicName, out topic);
+      }
+
+      return topic;
     }
-    
-    private bool disposedValue = false; 
+
+    public void SetOffset(string topicName, string groupName, int offset)
+    {
+      var topic = GetTopic(topicName);
+      if ( topic != null )
+      {
+        topic.SetOffset(groupName, offset);
+      }
+    }
+
+    private bool disposedValue = false;
+    private readonly GruppoSettings _settings;
 
     protected virtual void Dispose(bool disposing)
     {
@@ -65,7 +116,12 @@ namespace Gruppo.MessageBroker
       {
         if (disposing)
         {
-          Stop();
+          foreach(var topic in _topics)
+          {
+            topic.Value.Dispose();
+          }
+
+          _topics.Clear();
         }
 
 
@@ -76,6 +132,17 @@ namespace Gruppo.MessageBroker
     public void Dispose()
     {
       Dispose(true);
+    }
+
+    public void Consume(string topicName, long offset, out GruppoMessage message)
+    {
+      message = null;
+      Topic topic = GetTopic(topicName);
+
+      if (topic != null)
+      {
+        topic.Consume(offset, out message);
+      }
     }
   }
 }
